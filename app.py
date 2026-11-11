@@ -816,7 +816,7 @@ with tab_new:
     if uploaded_pages and st.button("Buchungsliste mit Gemini lesen", type="primary", use_container_width=True):
         try:
             with st.spinner("Lese Buchungsliste (kann 15–40 Sek. dauern)..."):
-                parsed = call_gemini_json(BOOK_PROMPT, uploaded_pages, "gemini-2.5-pro")
+                parsed = call_gemini_json(BOOK_PROMPT, uploaded_pages, "gemini-3.1-pro-preview")
             if not parsed or not parsed.get("rows"):
                 st.error("Keine Sendungen erkannt. Bitte schärfere Fotos hochladen.")
             else:
