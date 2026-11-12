@@ -192,18 +192,33 @@ def call_gemini_json(prompt: str, files: list, model_name: str = "gemini-2.5-fla
     api_key = get_api_key()
     if not api_key:
         raise ValueError("Kein Gemini API-Key hinterlegt.")
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
     contents = [prompt]
     for f in files:
         img = Image.open(f)
         img.thumbnail((2400, 2400))
         contents.append(img)
-    resp = client.models.generate_content(
-        model=model_name,
-        contents=contents,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    return json.loads(resp.text)
+
+    models_to_try = [model_name]
+    for fallback in ("gemini-2.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash-lite"):
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
+    last_err = None
+    for m in models_to_try:
+        try:
+            resp = client.models.generate_content(
+                model=m,
+                contents=contents,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            return json.loads(resp.text)
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 
 # ===== PDF ZEICHNUNG (FORM 752c - UNVERÄNDERTES LAYOUT) =====
@@ -816,7 +831,7 @@ with tab_new:
     if uploaded_pages and st.button("Buchungsliste mit Gemini lesen", type="primary", use_container_width=True):
         try:
             with st.spinner("Lese Buchungsliste (kann 15–40 Sek. dauern)..."):
-                parsed = call_gemini_json(BOOK_PROMPT, uploaded_pages, "gemini-3.1-pro-preview")
+                parsed = call_gemini_json(BOOK_PROMPT, uploaded_pages, "gemini-2.5-flash")
             if not parsed or not parsed.get("rows"):
                 st.error("Keine Sendungen erkannt. Bitte schärfere Fotos hochladen.")
             else:
