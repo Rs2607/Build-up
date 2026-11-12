@@ -1,6 +1,8 @@
 import json
+import os
 import re
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from fpdf import FPDF
@@ -9,6 +11,8 @@ from google.genai import types
 from PIL import Image
 
 st.set_page_config(page_title="ULD-Aufbau", page_icon="📦", layout="centered")
+
+STORAGE_PATH = Path("uld_app_storage.json")
 
 # ===== KONSTANTEN =====
 ST_KEY = {
@@ -87,7 +91,78 @@ AWB_PROMPT = 'Foto von einem Luftfracht-Etikett oder Frachtpapier. Lies die AWB-
 WAAGE_PROMPT = 'Foto vom Display einer Waage für Luftfracht-Paletten. Lies das angezeigte Gewicht in Kilogramm (nur die Zahl). Antworte NUR mit JSON: {"kg":1234.5} oder, wenn nicht sicher lesbar, {"kg":null,"grund":"kurz auf Deutsch"}.'
 
 
+# ===== DAUERHAFTE SPEICHERUNG =====
+def serialize_app_data() -> str:
+    payload = {
+        "flights": st.session_state.flights,
+        "current_fl": st.session_state.current_fl,
+        "states": st.session_state.states,
+        "me": st.session_state.me,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def apply_loaded_payload(data: dict) -> None:
+    flights = data.get("flights")
+    if isinstance(flights, dict) and flights:
+        if "DEMO" not in flights:
+            flights["DEMO"] = DEMO_FLIGHT
+        st.session_state.flights = flights
+    else:
+        st.session_state.flights = {"DEMO": DEMO_FLIGHT}
+
+    cur = data.get("current_fl")
+    if cur in st.session_state.flights:
+        st.session_state.current_fl = cur
+    else:
+        non_demo = [k for k in st.session_state.flights if k != "DEMO"]
+        st.session_state.current_fl = non_demo[-1] if non_demo else "DEMO"
+
+    states = data.get("states")
+    st.session_state.states = states if isinstance(states, dict) else {}
+
+    me = data.get("me")
+    if isinstance(me, dict):
+        st.session_state.me = {
+            "name": str(me.get("name", "")),
+            "nr": str(me.get("nr", "")),
+        }
+
+
+def load_persisted_data() -> None:
+    if STORAGE_PATH.exists():
+        try:
+            raw = STORAGE_PATH.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                apply_loaded_payload(data)
+                st.session_state["_last_saved_json"] = serialize_app_data()
+                return
+        except Exception:
+            pass
+    st.session_state.flights = {"DEMO": DEMO_FLIGHT}
+    st.session_state.current_fl = "DEMO"
+    st.session_state.states = {}
+    st.session_state.me = {"name": "", "nr": ""}
+
+
+def save_persisted_data() -> None:
+    try:
+        raw = serialize_app_data()
+        if raw == st.session_state.get("_last_saved_json"):
+            return
+        tmp_path = STORAGE_PATH.with_suffix(".tmp")
+        tmp_path.write_text(raw, encoding="utf-8")
+        os.replace(tmp_path, STORAGE_PATH)
+        st.session_state["_last_saved_json"] = raw
+    except Exception:
+        pass
+
+
 # ===== SESSION STATE INITIALISIERUNG =====
+if "db_loaded" not in st.session_state:
+    load_persisted_data()
+    st.session_state.db_loaded = True
 if "flights" not in st.session_state:
     st.session_state.flights = {"DEMO": DEMO_FLIGHT}
 if "current_fl" not in st.session_state:
@@ -111,6 +186,8 @@ def get_api_key() -> str:
 
 
 def get_fl() -> dict:
+    if st.session_state.current_fl not in st.session_state.flights:
+        st.session_state.current_fl = "DEMO"
     return st.session_state.flights[st.session_state.current_fl]
 
 
@@ -496,7 +573,35 @@ def generate_statements_pdf(ulds_to_print: list[dict], include_offload: bool, fl
 
 # ===== SIDEBAR: API-KEY & FLUG-AUSWAHL =====
 with st.sidebar:
-    st.subheader("Einstellungen")
+    st.subheader("Flug & Einstellungen")
+    fl_keys = list(st.session_state.flights.keys())
+    sel_fl = st.selectbox(
+        "Aktiver Flug",
+        fl_keys,
+        index=fl_keys.index(st.session_state.current_fl) if st.session_state.current_fl in fl_keys else 0,
+        format_func=lambda k: f"{st.session_state.flights[k]['code']} ({st.session_state.flights[k]['date']})",
+    )
+    if sel_fl != st.session_state.current_fl:
+        st.session_state.current_fl = sel_fl
+        save_persisted_data()
+        st.rerun()
+
+    if st.session_state.current_fl != "DEMO":
+        if st.button("🗑 Aktiven Flug löschen", use_container_width=True):
+            del_k = st.session_state.current_fl
+            st.session_state.flights.pop(del_k, None)
+            st.session_state.states.pop(del_k, None)
+            rem = [k for k in st.session_state.flights if k != "DEMO"]
+            st.session_state.current_fl = rem[-1] if rem else "DEMO"
+            save_persisted_data()
+            st.rerun()
+
+    st.divider()
+    st.subheader("Mitarbeiter (für Statement)")
+    st.session_state.me["name"] = st.text_input("Name", value=st.session_state.me["name"])
+    st.session_state.me["nr"] = st.text_input("PersNr.", value=st.session_state.me["nr"])
+
+    st.divider()
     if get_api_key():
         st.success("Gemini API-Key aktiv")
     else:
@@ -507,21 +612,25 @@ with st.sidebar:
             type="password",
         )
 
-    fl_keys = list(st.session_state.flights.keys())
-    sel_fl = st.selectbox(
-        "Aktiver Flug",
-        fl_keys,
-        index=fl_keys.index(st.session_state.current_fl),
-        format_func=lambda k: f"{st.session_state.flights[k]['code']} ({st.session_state.flights[k]['date']})",
-    )
-    if sel_fl != st.session_state.current_fl:
-        st.session_state.current_fl = sel_fl
-        st.rerun()
-
-    st.divider()
-    st.subheader("Mitarbeiter (für Statement)")
-    st.session_state.me["name"] = st.text_input("Name", value=st.session_state.me["name"])
-    st.session_state.me["nr"] = st.text_input("PersNr.", value=st.session_state.me["nr"])
+    with st.expander("Sicherung (Backup-Datei)", expanded=False):
+        st.caption("Alle Flüge & ULDs werden automatisch gespeichert. Zusätzlich kannst du hier eine Sicherung herunterladen:")
+        st.download_button(
+            "⬇ Backup speichern (.json)",
+            data=serialize_app_data().encode("utf-8"),
+            file_name=f"ULD_Backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        up_bak = st.file_uploader("Backup laden (.json)", type=["json"], key="bak_up")
+        if up_bak and st.button("Backup wiederherstellen", use_container_width=True):
+            try:
+                loaded = json.loads(up_bak.read().decode("utf-8"))
+                apply_loaded_payload(loaded)
+                save_persisted_data()
+                st.success("Backup wiederhergestellt!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ungültige Backup-Datei: {e}")
 
 
 # ===== HEADER =====
@@ -579,6 +688,7 @@ with tab_send:
                 "mat": {},
             })
             state["act"] = len(state["ulds"]) - 1
+            save_persisted_data()
             st.rerun()
     else:
         uld_labels = [f"{u['nr']} · {u['k']} ({uld_stk(u)} Stk)" for u in state["ulds"]]
@@ -604,6 +714,7 @@ with tab_send:
                     "awb": clean_awb, "stk": 99, "kg": 0.0, "m3": 0.0,
                     "scc": "NICHT GEBUCHT", "o": "?", "d": "?", "p": "", "x": True
                 })
+            save_persisted_data()
             st.rerun()
 
     for d in filtered:
@@ -651,6 +762,7 @@ with tab_send:
                             target_u["items"].append({"awb": d["awb"], "stk": int(qty_to_add)})
                         if d.get("x"):
                             d["stk"] = used_stk(d["awb"], state)
+                        save_persisted_data()
                         st.rerun()
 
 
@@ -684,6 +796,7 @@ with tab_ulds:
             })
             state["act"] = len(state["ulds"]) - 1
             st.session_state["new_uld_prefill"] = ""
+            save_persisted_data()
             st.rerun()
 
     for ix, u in enumerate(state["ulds"]):
@@ -695,6 +808,7 @@ with tab_ulds:
             if ix != state["act"]:
                 if hc2.button("Aktiv setzen", key=f"act_{ix}", use_container_width=True):
                     state["act"] = ix
+                    save_persisted_data()
                     st.rerun()
 
             st.caption(f"{uld_stk(u)} Stk · Ware ca. {fmt_num(uld_kg(u, fl, state))} kg · {status_txt}")
@@ -707,6 +821,7 @@ with tab_ulds:
                     ic2.write(f"{it['stk']}/{d['stk'] if d else it['stk']} Stk")
                     if ic3.button("✕", key=f"rm_{ix}_{j}"):
                         u["items"].pop(j)
+                        save_persisted_data()
                         st.rerun()
 
             with st.expander("Statement-Felder ausfüllen (Form 752c)", expanded=bool(miss)):
@@ -725,6 +840,7 @@ with tab_ulds:
                             res = call_gemini_json(WAAGE_PROMPT, [w_cam], "gemini-2.5-flash")
                         if res.get("kg") is not None:
                             u["brutto"] = str(round(float(res["kg"]), 1)).replace(".", ",")
+                            save_persisted_data()
                             st.rerun()
                         else:
                             st.error(f"Nicht lesbar: {res.get('grund', '')}")
@@ -767,6 +883,7 @@ with tab_ulds:
             if bc2.button("Löschen", key=f"del_{ix}", use_container_width=True):
                 state["ulds"].pop(ix)
                 state["act"] = max(0, len(state["ulds"]) - 1)
+                save_persisted_data()
                 st.rerun()
 
 
@@ -891,4 +1008,8 @@ with tab_new:
             }
             st.session_state.current_fl = fl_key
             del st.session_state["parsed_booking"]
+            save_persisted_data()
             st.rerun()
+
+# ===== AUTOMATISCHES SPEICHERN NACH JEDER ÄNDERUNG =====
+save_persisted_data()
